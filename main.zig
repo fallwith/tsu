@@ -123,6 +123,19 @@ fn clearCache(allocator: std.mem.Allocator) !void {
     try ensureCacheDir(allocator);
 }
 
+fn isValidTideWindow(window: *const TideWindow) bool {
+    const now = std.time.timestamp();
+    const yesterday = now - SECONDS_PER_DAY;
+    const tomorrow_end = now + SECONDS_PER_DAY;
+
+    for (window) |event| {
+        if (event.timestamp < yesterday or event.timestamp > tomorrow_end) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn writeCache(allocator: std.mem.Allocator, window: *const TideWindow, station_id: []const u8, date: []const u8) !void {
     const cache_path = try getCachePath(allocator, station_id, date);
     defer allocator.free(cache_path);
@@ -381,8 +394,12 @@ fn fetchDayData(allocator: std.mem.Allocator, station_id: []const u8, date: []co
         // Cache miss - clear cache and fetch fresh data
         try clearCache(allocator);
         const window = try fetchTideWindow(allocator, station_id, date);
-        try writeCache(allocator, &window, station_id, date);
-        return determineCurrentStatus(allocator, &window);
+        if (isValidTideWindow(&window)) {
+            try writeCache(allocator, &window, station_id, date);
+            return determineCurrentStatus(allocator, &window);
+        } else {
+            return try allocator.dupe(u8, "?.???");
+        }
     }
 }
 

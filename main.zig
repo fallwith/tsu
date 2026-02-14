@@ -6,16 +6,16 @@ const CACHE_BUFFER_SIZE = 96;
 const EVENTS_PER_WINDOW = 6;
 const BYTES_PER_EVENT = 16;
 const SECONDS_PER_DAY = 86400;
-const HTTP_TIMEOUT_MS = 10000;
-const MAX_RESPONSE_SIZE = 1024 * 1024;
-const SMALL_JSON_BUFFER_SIZE = 8192;
 
 const DAYS_IN_MONTHS = [_]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 const DAYS_IN_MONTHS_LEAP = [_]u32{ 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 
-const stdout = std.io.getStdOut().writer();
 fn print(comptime fmt: []const u8, args: anytype) !void {
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
     try stdout.print(fmt, args);
+    try stdout.flush();
 }
 
 const TideEvent = struct {
@@ -36,13 +36,7 @@ const TideResponse = struct {
 };
 
 fn getStationId(allocator: std.mem.Allocator) ![]const u8 {
-    return std.process.getEnvVarOwned(allocator, "NOAA_GOV_STATION_ID") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            try std.io.getStdErr().writer().print("Error: NOAA_GOV_STATION_ID environment variable is required\n", .{});
-            return err;
-        },
-        else => return err,
-    };
+    return std.process.getEnvVarOwned(allocator, "NOAA_GOV_STATION_ID");
 }
 
 const DateParts = struct {
@@ -160,10 +154,6 @@ fn writeCache(allocator: std.mem.Allocator, window: *const TideWindow, station_i
     }
 }
 
-fn addDaysToTimestamp(timestamp: i64, days: i32) i64 {
-    return timestamp + (@as(i64, days) * SECONDS_PER_DAY);
-}
-
 fn addDaysToDate(allocator: std.mem.Allocator, date_str: []const u8, days: i32) ![]u8 {
     var parts = std.mem.splitScalar(u8, date_str, '-');
     const year = try std.fmt.parseInt(u32, parts.next().?, 10);
@@ -183,26 +173,30 @@ fn addDaysToDate(allocator: std.mem.Allocator, date_str: []const u8, days: i32) 
 
 fn httpGetWithClient(client: *std.http.Client, allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     const uri = try std.Uri.parse(url);
-    const server_header_buffer = try allocator.alloc(u8, 8192);
-    defer allocator.free(server_header_buffer);
 
-    var request = try client.open(.GET, uri, .{
-        .server_header_buffer = server_header_buffer,
+    var req = try client.request(.GET, uri, .{
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
     });
-    defer request.deinit();
+    defer req.deinit();
 
-    try request.send();
-    try request.finish();
-    try request.wait();
+    try req.sendBodiless();
 
-    const body = try request.reader().readAllAlloc(allocator, MAX_RESPONSE_SIZE);
-    return body;
-}
+    var redirect_buffer: [8192]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
 
-fn httpGet(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
-    return httpGetWithClient(&client, allocator, url);
+    if (response.head.status != .ok) {
+        return error.HttpRequestFailed;
+    }
+
+    var transfer_buffer: [8192]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+
+    var body = std.ArrayList(u8){};
+    errdefer body.deinit(allocator);
+
+    try reader.appendRemainingUnlimited(allocator, &body);
+
+    return try body.toOwnedSlice(allocator);
 }
 
 fn parseTimeToTimestamp(time_str: []const u8) !i64 {
@@ -254,7 +248,7 @@ fn fetchTideWindow(allocator: std.mem.Allocator, station_id: []const u8, date: [
     const yesterday = try addDaysToDate(arena_allocator, date, -1);
     const tomorrow = try addDaysToDate(arena_allocator, date, 1);
 
-    var all_events = std.ArrayList(TideEvent).init(arena_allocator);
+    var all_events = std.ArrayList(TideEvent){};
 
     // Reuse HTTP client for multiple requests
     var client = std.http.Client{ .allocator = arena_allocator };
@@ -278,7 +272,7 @@ fn fetchTideWindow(allocator: std.mem.Allocator, station_id: []const u8, date: [
             for (predictions) |pred| {
                 const height = std.fmt.parseFloat(f64, pred.v) catch 0.0;
                 const timestamp = parseTimeToTimestamp(pred.t) catch continue;
-                try all_events.append(TideEvent{ .timestamp = timestamp, .height = height });
+                try all_events.append(arena_allocator, TideEvent{ .timestamp = timestamp, .height = height });
             }
         }
     }
@@ -369,7 +363,8 @@ fn interpolateCurrentTideHeight(window: *const TideWindow) f64 {
         if (total_duration > 0.0) {
             const ratio = elapsed_duration / total_duration;
             const height_diff = after.height - before.height;
-            return before.height + (height_diff * ratio);
+            const cosine_ratio = (1.0 - @cos(ratio * std.math.pi)) / 2.0;
+            return before.height + (height_diff * cosine_ratio);
         }
         return before.height;
     } else if (before_event != null) {

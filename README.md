@@ -3,8 +3,8 @@
 tsu is a little utility that outputs tidal information in a brief format
 suitable for inclusion within a shell prompt.
 
-Tidal data is fetched once per day from NOAA.gov and cached, allowing `tsu` to
-be quite quick.
+Tidal data (6-minute interval predictions) is fetched once per day from
+NOAA.gov and cached, allowing `tsu` to be quite quick.
 
 ## Example Output
 
@@ -25,6 +25,9 @@ $ tsu
 ```shell
 cd tsu
 zig build -Doptimize=ReleaseFast -Dstrip=true
+
+# optionally, run the test suite
+zig build test
 ```
 
 2. Move the resulting `tsu/zig-out/bin/tsu` binary to a directory in your

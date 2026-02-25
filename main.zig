@@ -119,24 +119,16 @@ fn clearCache(allocator: std.mem.Allocator) !void {
 
 fn isValidTideWindow(window: *const TideWindow) bool {
     const now = std.time.timestamp();
-    const valid_start = now - (36 * 3600); // 36 hours ago (covers yesterday afternoon/evening)
-    const valid_end = now + (36 * 3600);   // 36 hours from now (covers tomorrow morning/afternoon)
+    var has_past = false;
+    var has_future = false;
 
-    // Check timestamp ranges
     for (window) |event| {
-        if (event.timestamp < valid_start or event.timestamp > valid_end) {
-            return false;
-        }
+        if (event.timestamp == 0) return false;
+        if (event.timestamp <= now) has_past = true;
+        if (event.timestamp > now) has_future = true;
     }
 
-    // Also require at least one future event for tide direction determination
-    for (window) |event| {
-        if (event.timestamp > now) {
-            return true; // Found future event, window is valid
-        }
-    }
-
-    return false; // No future events, window is stale
+    return has_past and has_future;
 }
 
 fn writeCache(allocator: std.mem.Allocator, window: *const TideWindow, station_id: []const u8, date: []const u8) !void {
